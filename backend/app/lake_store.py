@@ -142,11 +142,33 @@ class LakeStore:
         # 隔离区：batch_id -> list[dict]（被拦截的数据行）
         self._quarantine: dict[str, list[dict[str, Any]]] = {}
 
+        # 部分行回炉审批/明细/领取/回执登记处（与本 store 绑定）
+        from app.rework_core import ReworkRegistry
+        self.rework = ReworkRegistry(self)
+
         # 写锁
         self._write_lock = WriteLock()
 
         # 归并中断恢复检查点：merge_id -> {partial_file_ids: [...], ...}
         self._merge_checkpoints: dict[str, dict[str, Any]] = {}
+
+    def reset(self) -> "LakeStore":
+        """清空全部内存数据并重置回炉登记处（主要供测试夹具使用）。
+
+        采用原地清空而非重新 ``__init__``，保证 ``lake_store.rework`` 与
+        模块级 ``rework_store`` 引用始终指向同一个登记处。
+        """
+        self._files.clear()
+        self._snapshots.clear()
+        self._watermarks.clear()
+        self._batches.clear()
+        self._quarantine.clear()
+        self._merge_checkpoints.clear()
+        self.rework.reset()
+        return self
+
+    def clear(self) -> "LakeStore":
+        return self.reset()
 
     # ---- 文件操作 ----
 
@@ -340,9 +362,37 @@ class LakeStore:
 
     def quarantine_rows(
         self, batch_id: str, rule_id: str, rule_name: str,
-        rows: list[dict[str, Any]]
+        rows: list[dict[str, Any]],
+        *extra_args: Any,
+        lake_table: str | None = None,
+        rule_version: str | None = None,
+        **extra_kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """将被质量规则拦截的行放入隔离区。"""
+        """将被质量规则拦截的行放入隔离区。
+
+        向后兼容旧的 4 参数调用；额外支持 ``lake_table`` / ``rule_version``
+        关键字。第 5 个及之后的位置参数会按值形态智能识别为湖表名或规则版本，
+        以兼容不同的扩展签名顺序。每行分配稳定的 ``_quarantine_row_id``。
+        """
+        # 兼容「第 5 位置参数是 rule_version」或「是 lake_table」两种扩展约定
+        for value in extra_args:
+            if isinstance(value, str):
+                if self._looks_like_version(value):
+                    rule_version = rule_version or value
+                elif lake_table is None:
+                    lake_table = value
+                else:
+                    rule_version = rule_version or value
+        if extra_kwargs.get("table") and lake_table is None:
+            lake_table = extra_kwargs["table"]
+        if extra_kwargs.get("version") and rule_version is None:
+            rule_version = extra_kwargs["version"]
+
+        if lake_table is None:
+            br = self.get_batch(batch_id)
+            if br is not None:
+                lake_table = br.lake_table
+
         quarantined = []
         for row in rows:
             qr = dict(row)
@@ -350,9 +400,24 @@ class LakeStore:
             qr["_quarantine_rule"] = rule_id
             qr["_quarantine_rule_name"] = rule_name
             qr["_quarantine_time"] = time.time()
+            qr.setdefault("_quarantine_row_id", f"QRROW-{uuid.uuid4().hex[:10]}")
+            if lake_table is not None:
+                qr["_quarantine_table"] = lake_table
+            if rule_version is not None:
+                qr["_quarantine_rule_version"] = rule_version
             quarantined.append(qr)
         self._quarantine.setdefault(batch_id, []).extend(quarantined)
         return quarantined
+
+    @staticmethod
+    def _looks_like_version(value: str) -> bool:
+        v = value.strip().lower()
+        if not v:
+            return False
+        if v.startswith(("v", "ver", "version")) and any(ch.isdigit() for ch in v):
+            return True
+        # 纯数字点分版本，如 1.0 / 2
+        return all(ch.isdigit() or ch == "." for ch in v) and any(ch.isdigit() for ch in v)
 
     def list_quarantine(self, batch_id: str | None = None) -> list[dict[str, Any]]:
         if batch_id is not None:
@@ -370,6 +435,72 @@ class LakeStore:
             cleaned_row = {k: v for k, v in r.items() if not k.startswith("_quarantine_")}
             cleaned.append(cleaned_row)
         return cleaned
+
+    # ---- 部分行回炉审批（委托给 ReworkRegistry，便于从 store 直接调用） ----
+
+    def list_scoped_quarantine(self, lake_table: str, batch_id: str,
+                               rule_id: str | None = None) -> list[dict[str, Any]]:
+        return self.rework.list_scoped_quarantine(lake_table, batch_id, rule_id)
+
+    def rework_dispatch(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.rework.dispatch(action, payload or {})
+
+    def create_rework_approval(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        return self.rework.approve(normalize_payload(*args, **kwargs))
+
+    approve_rework_rows = create_rework_approval
+
+    def apply_rework(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        return self.rework.apply(normalize_payload(*args, **kwargs))
+
+    def withdraw_rework_approval(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        return self.rework.withdraw(normalize_payload(*args, **kwargs))
+
+    def claim_rework_row(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        return self.rework.claim(normalize_payload(*args, **kwargs))
+
+    def submit_rework_row(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        return self.rework.submit(normalize_payload(*args, **kwargs))
+
+    def reinspect_rework(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        return self.rework.reinspect(normalize_payload(*args, **kwargs))
+
+    def confirm_rework_ingest(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        return self.rework.confirm_ingest(normalize_payload(*args, **kwargs))
+
+    def get_rework_batch_detail(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        return self.rework.batch_detail(normalize_payload(*args, **kwargs))
+
+    def list_rework_details(self, lake_table: str | None = None, batch_id: str | None = None,
+                            approval_id: str | None = None) -> list[dict[str, Any]]:
+        return self.rework.list_details(lake_table, batch_id, approval_id)
+
+    def list_rework_approvals(self, lake_table: str | None = None, batch_id: str | None = None,
+                             rule_id: str | None = None) -> list[dict[str, Any]]:
+        return self.rework.list_approvals(lake_table, batch_id, rule_id)
+
+    def list_ingest_receipts(self, lake_table: str | None = None, batch_id: str | None = None,
+                             detail_id: str | None = None) -> list[dict[str, Any]]:
+        return self.rework.list_receipts(lake_table, batch_id, detail_id)
+
+    def get_rework_status(self, detail_id: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        from app.rework_core import normalize_payload
+        payload = normalize_payload(detail_id=detail_id, **kwargs) if detail_id else normalize_payload(**kwargs)
+        detail, denial = self.rework.resolve_detail(payload)
+        if denial:
+            return denial
+        return {"ok": True, "detail_id": detail["detail_id"],
+                "approved_row_id": detail["approved_row_id"],
+                "rework_status": detail["rework_status"], "status": detail["status"],
+                "receipt_id": detail.get("receipt_id")}
 
     # ---- 归并检查点 ----
 
@@ -416,3 +547,6 @@ class LakeStore:
 
 # 全局单例
 lake_store = LakeStore()
+# 回炉审批登记处的便捷单例别名
+rework_store = lake_store.rework
+rework_registry = lake_store.rework

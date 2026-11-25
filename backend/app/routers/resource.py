@@ -94,5 +94,17 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
 @router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
 def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
-    return ActionResult(ok=entry is not None, message=message, entry=entry)
+    action = payload.action.strip()
+    try:
+        entry, message = service.run_action(entry_id, action, payload)
+    except TypeError:
+        # 兼容未声明 payload 形参的旧服务方法
+        entry, message = service.run_action(entry_id, action)
+    result = None
+    if isinstance(entry, dict) and isinstance(entry.get("rework_result"), dict):
+        result = entry.get("rework_result")
+    ok = entry is not None
+    # 回炉等富动作即使返回了承载 dict，也要以领域结果里的 ok 为准
+    if isinstance(result, dict) and result.get("ok") is False:
+        ok = False
+    return ActionResult(ok=ok, message=message, entry=entry, result=result)

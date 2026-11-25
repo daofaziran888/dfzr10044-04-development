@@ -1,5 +1,6 @@
 <template>
   <section class="page" :data-module="meta.key">
+    <ReworkPanel v-if="meta.key === 'quarantine_zone'" />
     <header class="page-head">
       <div>
         <h2>{{ meta.name }}</h2>
@@ -104,6 +105,7 @@ import {
   runAction as applyAction,
 } from '@/api/backend-service'
 import type { EntryRow } from '@/data/types'
+import ReworkPanel from '@/components/ReworkPanel.vue'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)

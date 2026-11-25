@@ -33,7 +33,7 @@ class LakeCatalogService(BaseModuleService):
             )
         return entry, missing
 
-    def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+    def run_action(self, entry_id: int, action: str, payload: Any = None) -> tuple[dict[str, Any] | None, str]:
         """湖表操作：确认登记时触发水位初始化，下线时释放锁。"""
         entry = store.find(self.MODULE, entry_id)
         if entry is None:

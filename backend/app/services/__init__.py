@@ -18,6 +18,8 @@ from app.services.stats_profile import StatsProfileService
 from app.services.column_stat import ColumnStatService
 from app.services.quality_rule import QualityRuleService
 from app.services.quarantine_zone import QuarantineZoneService
+from app.services.quarantine_rework import QuarantineReworkService
+from app.services.rework_approval import ReworkApprovalService
 from app.services.rebuild_backfill import RebuildBackfillService
 from app.services.storage_tier import StorageTierService
 from app.services.retention_window import RetentionWindowService
@@ -42,6 +44,8 @@ SERVICES: dict[str, BaseModuleService] = {
     "column_stat": ColumnStatService(),
     "quality_rule": QualityRuleService(),
     "quarantine_zone": QuarantineZoneService(),
+    "quarantine_rework": QuarantineReworkService(),
+    "rework_approval": ReworkApprovalService(),
     "rebuild_backfill": RebuildBackfillService(),
     "storage_tier": StorageTierService(),
     "retention_window": RetentionWindowService(),
